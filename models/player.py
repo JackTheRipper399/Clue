@@ -1,5 +1,5 @@
 import random
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Tuple
 from dataclasses import dataclass, field
 from models.cards import Card, CardType, category_cards, card_key
 from logic.knowledge_base import KnowledgeBase, ENVELOPE
@@ -19,19 +19,20 @@ class Player:
         return any(c in self.hand for c in cards)
 
     def choose_card_to_show(self, suggested: List[Card], suggester: str) -> Optional[Card]:
+        # Only AI uses this; humans use a dialog in the UI.
         matches = [c for c in suggested if c in self.hand]
         if not matches:
             return None
 
         # 1. Prefer to show a card already known to the suggester
-        known_cards = [
-            c for c in matches if self.kb.is_known_to_player(suggester, c)]
+        known_cards = [c for c in matches if getattr(
+            self, "kb", None) and self.kb.is_known_to_player(suggester, c)]
         if known_cards:
             return random.choice(known_cards)
 
         # 2. If none known, pick one that’s already been refuted before
-        refuted_cards = [
-            c for c in matches if self.kb.has_been_refuted_before(c)]
+        refuted_cards = [c for c in matches if getattr(
+            self, "kb", None) and self.kb.has_been_refuted_before(c)]
         if refuted_cards:
             return random.choice(refuted_cards)
 
@@ -60,10 +61,27 @@ class AIPlayer(Player):
     def note_has_one_of(self, player: str, suggested: List[Card]) -> None:
         self.kb.note_has_one_of(player, suggested)
 
+    def note_no_one_refuted(self, suggested: List[Card]) -> None:
+        """As the suggester: if nobody refuted and we don't own the cards, they must be in the envelope."""
+        for card in suggested:
+            if card not in self.hand:
+                self.kb.mark_envelope(card)
+
+    def try_infer_envelope_after_no_refute(self, suggester: str, suggested: List[Card]) -> None:
+        """
+        As an observer: after everyone passed, if our KB already knows that
+        every player (including the suggester) does NOT have a card, then
+        it must be in the envelope.
+        """
+        for card in suggested:
+            ck = card_key(card)
+            if all(self.kb.matrix[ck].get(p) is False for p in self.kb.players):
+                self.kb.mark_envelope(card)
+
     def decide_suggestion(self) -> Tuple[Card, Card, Card]:
+        # If ready to accuse, make that suggestion to confirm; else pick weighted unknowns
         maybe_solution = self.kb.current_solution_guess()
         if maybe_solution:
-            # If we already have a unique candidate in each category, suggest it to try to confirm
             return maybe_solution
 
         # Dynamic exploration → exploitation based on progress
@@ -72,7 +90,7 @@ class AIPlayer(Player):
         progress_ratio = seen_cards / total_cards if total_cards else 0.0
         info_weight = max(0.0, 0.5 * (1.0 - progress_ratio))
 
-        guess = []
+        guess: List[Card] = []
         for cat in ("Suspect", "Weapon", "Room"):
             candidates = category_cards(cat)
 
@@ -83,14 +101,14 @@ class AIPlayer(Player):
                     1 for p in self.kb.players
                     if self.kb.is_known_to_player(p, card) is None
                 )
-                info_gain = unknown_holders / \
-                    len(self.kb.players) if self.kb.players else 0.0
+                info_gain = (unknown_holders / len(self.kb.players)
+                             ) if self.kb.players else 0.0
                 return env_prob + info_weight * info_gain
 
             best = max(candidates, key=score)
             guess.append(best)
 
-        return tuple(guess)
+        return tuple(guess)  # type: ignore[return-value]
 
     def decide_accusation(self) -> Optional[Tuple[Card, Card, Card]]:
         # 1) Absolute certainty
@@ -105,8 +123,11 @@ class AIPlayer(Player):
 
         # 3) Confidence-based accusation off normalized category probabilities
         def top_two(cat: CardType):
-            items = [(c, self.kb.envelope_probs[card_key(c)]) for c in category_cards(cat)
-                     if self.kb.matrix[card_key(c)][ENVELOPE] is not False]
+            items = [
+                (c, self.kb.envelope_probs[card_key(c)])
+                for c in category_cards(cat)
+                if self.kb.matrix[card_key(c)][ENVELOPE] is not False
+            ]
             items.sort(key=lambda x: x[1], reverse=True)
             top_card, p1 = items[0]
             p2 = items[1][1] if len(items) > 1 else 0.0
@@ -116,25 +137,40 @@ class AIPlayer(Player):
         w_card, pw1, pw2 = top_two("Weapon")
         r_card, pr1, pr2 = top_two("Room")
 
-        # Progress: how much of the envelope space has been eliminated
+        # Progress: how much envelope space is eliminated
         total_env_slots = sum(len(category_cards(cat))
                               for cat in ("Suspect", "Weapon", "Room"))
-        eliminated = sum(1 for cat in ("Suspect", "Weapon", "Room") for c in category_cards(cat)
-                         if self.kb.matrix[card_key(c)][ENVELOPE] is False)
+        eliminated = sum(
+            1 for cat in ("Suspect", "Weapon", "Room") for c in category_cards(cat)
+            if self.kb.matrix[card_key(c)][ENVELOPE] is False
+        )
         progress = eliminated / total_env_slots if total_env_slots else 0.0
 
         # Dynamic thresholds: cautious early, assertive late
         per_cat_min = 0.50 + 0.25 * progress       # 0.50 → 0.75
-        margin_min = 0.05 + 0.15 * progress       # 0.05 → 0.20
+        margin_min = 0.05 + 0.15 * progress        # 0.05 → 0.20
         product_min = 0.20 + 0.30 * progress       # 0.20 → 0.50
 
-        # Per-category strength and margin checks
+        # Bold risk shortcuts
+        RISK_ACCUSATION_THRESHOLD = 0.85
+        BIG_MARGIN = 0.40
+
+        # Shortcut 1: Very high confidence in each category
+        if ps1 >= RISK_ACCUSATION_THRESHOLD and pw1 >= RISK_ACCUSATION_THRESHOLD and pr1 >= RISK_ACCUSATION_THRESHOLD:
+            return (s_card, w_card, r_card)
+
+        # Shortcut 2: Huge margin + reasonably high confidence
+        if ((ps1 - ps2) >= BIG_MARGIN and ps1 >= 0.75 and
+            (pw1 - pw2) >= BIG_MARGIN and pw1 >= 0.75 and
+                (pr1 - pr2) >= BIG_MARGIN and pr1 >= 0.75):
+            return (s_card, w_card, r_card)
+
+        # Standard dynamic threshold checks
         if not (ps1 >= per_cat_min and pw1 >= per_cat_min and pr1 >= per_cat_min):
             return None
         if not ((ps1 - ps2) >= margin_min and (pw1 - pw2) >= margin_min and (pr1 - pr2) >= margin_min):
             return None
 
-        # Overall confidence assuming independence across categories
         product_conf = ps1 * pw1 * pr1
         if product_conf < product_min:
             return None

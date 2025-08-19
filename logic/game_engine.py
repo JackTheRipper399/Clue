@@ -1,10 +1,11 @@
 import random
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass, field
-from models.cards import Card, all_cards, category_cards
+from models.cards import Card, all_cards, category_cards, card_key
 from models.player import Player, AIPlayer
 from logic.knowledge_base import ENVELOPE
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from ui.app import ClueApp  # type hint only
 
@@ -37,7 +38,7 @@ class GameEngine:
         self.players = [Player(self.human_name, True)] + \
             [AIPlayer(f"AI {i+1}") for i in range(self.ai_count)]
         for p in self.players:
-            p.is_active = True  # ensure everyone starts active
+            p.is_active = True
 
         # Build solution and deal
         suspects = category_cards("Suspect")
@@ -82,7 +83,6 @@ class GameEngine:
             self.log(f"{self.winner} wins by being the last active player.")
 
     def _ensure_turn_on_active(self) -> None:
-        # Move turn_index to an active player if current is inactive
         if not self.players:
             return
         for _ in range(len(self.players)):
@@ -138,7 +138,7 @@ class GameEngine:
             f"{suggester.name} suggests: {suspect.name} with the {weapon.name} in the {room.name}.")
 
         passes_before_refute: List[str] = []
-        result: Dict[str, Optional[Card]] = {"shower": None, "card": None}
+        result = {"shower": None, "card": None}  # type: ignore
 
         for responder in self.player_order_after(suggester):
             if responder.has_any(suggested):
@@ -155,10 +155,12 @@ class GameEngine:
                 else:
                     shown = responder.choose_card_to_show(
                         suggested, self.current_player.name)
+
                 if shown is None:
                     # Should not happen given has_any
                     passes_before_refute.append(responder.name)
                     continue
+
                 # Notify knowledge bases
                 if isinstance(suggester, AIPlayer):
                     suggester.note_refute_seen(responder.name, shown)
@@ -172,6 +174,7 @@ class GameEngine:
                         if isinstance(p, AIPlayer):
                             for passer in passes_before_refute:
                                 p.note_pass(passer, suggested)
+
                 self.log(f"{responder.name} shows a card to {suggester.name}.")
                 result["shower"] = responder.name
                 result["card"] = shown if suggester.is_human else None
@@ -185,13 +188,16 @@ class GameEngine:
         if isinstance(suggester, AIPlayer):
             for passer in passes_before_refute:
                 suggester.note_pass(passer, suggested)
-            # If no one refuted and suggester doesn't own these, they may infer envelope candidates
-            # Handled by generic propagation when future notes appear
-        else:
-            for p in self.players:
-                if isinstance(p, AIPlayer):
-                    for passer in passes_before_refute:
-                        p.note_pass(passer, suggested)
+            # Suggester can conclude envelope for any of the suggested cards they don't hold
+            suggester.note_no_one_refuted(suggested)
+
+        # Observers also learn all passes; some may be able to conclude envelope too
+        for p in self.players:
+            if isinstance(p, AIPlayer):
+                for passer in passes_before_refute:
+                    p.note_pass(passer, suggested)
+                p.try_infer_envelope_after_no_refute(suggester.name, suggested)
+
         self.suggested_this_turn = True
         return result
 
@@ -211,25 +217,36 @@ class GameEngine:
             self._maybe_end_if_single_remaining()
         return correct
 
-    def take_ai_turn(self, ai: AIPlayer):
-        """Runs an AI turn: attempt accusation, else make a suggestion."""
-        self.debug_probs(ai)  # See their current probability table
+    # --- AI turn helpers ---
 
+    def take_ai_turn(self, ai: AIPlayer):
+        """Runs an AI turn: attempt accusation, else suggest, then re-check accusation."""
+        self.debug_probs(ai)  # Console snapshot of current beliefs
+
+        # First attempt: accuse right away if confident
         accusation = ai.decide_accusation()
         if accusation:
             s, w, r = accusation
             self.log(
-                f"{ai.name} decides to accuse: {s.name} with the {w.name} in the {r.name}")
+                f"{ai.name} decides to accuse right away: {s.name} with the {w.name} in the {r.name}")
             self.check_accusation(ai, s, w, r)
             return
 
-        # If no accusation is made
+        # Make a suggestion
         s, w, r = ai.decide_suggestion()
         self.handle_suggestion(ai, s, w, r)
 
+        # Second chance: new info might push them to accuse
+        if not self.game_over and ai.is_active:
+            accusation = ai.decide_accusation()
+            if accusation:
+                s, w, r = accusation
+                self.log(
+                    f"{ai.name} makes a follow-up accusation after suggestion: {s.name} with the {w.name} in the {r.name}")
+                self.check_accusation(ai, s, w, r)
+
     def debug_probs(self, ai: AIPlayer):
-        """Print the top three envelope candidates per category."""
-        from models.cards import category_cards, card_key
+        """Print the top three envelope candidates per category for an AI."""
         print(f"\n[{ai.name} probability snapshot]")
         for cat in ("Suspect", "Weapon", "Room"):
             items = sorted(

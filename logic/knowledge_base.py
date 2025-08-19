@@ -8,36 +8,38 @@ class KnowledgeBase:
     def __init__(self, owner: str):
         self.owner = owner
         self.players: List[str] = []
-        # matrix[card_key][holder] -> True/False/None (None = unknown)
+        # Certainty matrix: matrix[card_key][holder] -> True/False/None (None = unknown)
         self.matrix: Dict[str, Dict[str, Optional[bool]]] = {}
-        # Track cards that have been revealed/refuted at least once
+        # Cards that have been revealed/refuted at least once
         self.refuted_cards: set[str] = set()
 
-        # NEW: probability tracking
+        # Probability tracking
         self.prob_matrix: Dict[str, Dict[str, float]] = {}
         self.envelope_probs: Dict[str, float] = {}
+        # Soft weights to bias probability among unknown holders (for "has one of" hints)
         self.bias_matrix: Dict[str, Dict[str, float]] = {}
 
     def initialize(self, players: List[str], all_cards: List[Card], my_hand: List[Card]) -> None:
         self.players = players[:]
         holders = players + [ENVELOPE]
+
         for c in all_cards:
             ck = card_key(c)
             self.matrix[ck] = {h: None for h in holders}
 
-        # Our hand is known
+        # Own hand known
         for c in my_hand:
             ck = card_key(c)
             for h in holders:
                 self.matrix[ck][h] = (h == self.owner)
 
-        # A card cannot be both in someone's hand and the envelope
+        # Can't be both in hand and envelope
         for c in all_cards:
             ck = card_key(c)
             if self.matrix[ck][self.owner]:
                 self.matrix[ck][ENVELOPE] = False
 
-        # Init probability structures
+        # Initialise probability structures
         self.prob_matrix = {p: {ck: 0.0 for ck in self.matrix}
                             for p in players}
         self.envelope_probs = {
@@ -52,7 +54,7 @@ class KnowledgeBase:
     def category_of_key(self, ck: str) -> CardType:
         for cat in ("Suspect", "Weapon", "Room"):
             if ck in [card_key(c) for c in category_cards(cat)]:
-                return cat
+                return cat  # type: ignore[return-value]
         raise ValueError(f"Unknown card key {ck}")
 
     def note_has_card(self, player: str, card: Card) -> None:
@@ -65,29 +67,26 @@ class KnowledgeBase:
     def note_cannot_have_any(self, player: str, cards: List[Card]) -> None:
         for c in cards:
             ck = card_key(c)
-            if player in self.matrix[ck]:
-                if self.matrix[ck][player] is not True:
-                    self.matrix[ck][player] = False
+            if player in self.matrix[ck] and self.matrix[ck][player] is not True:
+                self.matrix[ck][player] = False
         self._propagate()
 
     def note_has_one_of(self, player: str, cards: List[Card]) -> None:
+        # Soft-evidence: bump bias toward these cards for that player if unknown
         cks = [card_key(c) for c in cards]
         unknowns = [ck for ck in cks if self.matrix[ck][player] is None]
         if not unknowns:
             return
-        # Increase weight so this player becomes a more likely holder for these cards
         for ck in unknowns:
             self.bias_matrix[player][ck] += 1.0
         self._propagate()
 
     def is_card_resolved(self, card: Card) -> bool:
-        ck = card_key(card)
-        vals = self.matrix.get(ck, {})
-        return list(vals.values()).count(True) == 1
+        vals = self.matrix.get(card_key(card), {}).values()
+        return list(vals).count(True) == 1
 
     def holder_of(self, card: Card) -> Optional[str]:
-        ck = card_key(card)
-        for h, v in self.matrix.get(ck, {}).items():
+        for h, v in self.matrix.get(card_key(card), {}).items():
             if v is True:
                 return h
         return None
@@ -96,7 +95,7 @@ class KnowledgeBase:
         res = []
         for c in category_cards(cat):
             ck = card_key(c)
-            v = self.matrix.get(ck, {}).get(ENVELOPE, None)
+            v = self.matrix[ck][ENVELOPE]
             if v is not False and self.holder_of(c) is None:
                 res.append(c)
         return res
@@ -108,31 +107,38 @@ class KnowledgeBase:
             "Weapon") if self.matrix[card_key(c)][ENVELOPE] is True]
         rooms = [c for c in category_cards(
             "Room") if self.matrix[card_key(c)][ENVELOPE] is True]
-        if len(suspects) == 1 and len(weapons) == 1 and len(rooms) == 1:
+        if len(suspects) == len(weapons) == len(rooms) == 1:
             return suspects[0], weapons[0], rooms[0]
         return None
 
     def current_solution_guess(self) -> Optional[Tuple[Card, Card, Card]]:
-        def single(cats: CardType):
-            cand = self.possible_in_envelope(cats)
+        def single(cat: CardType):
+            cand = self.possible_in_envelope(cat)
             return cand[0] if len(cand) == 1 else None
         s, w, r = single("Suspect"), single("Weapon"), single("Room")
-        if s and w and r:
-            return (s, w, r)
-        return None
+        return (s, w, r) if s and w and r else None
 
     def is_known_to_player(self, player: str, card: Card) -> Optional[bool]:
-        return self.matrix.get(card_key(card), {}).get(player)
+        return self.matrix[card_key(card)].get(player)
 
     def has_been_refuted_before(self, card: Card) -> bool:
         return card_key(card) in self.refuted_cards
+
+    def mark_envelope(self, card: Card) -> None:
+        """Force-mark this card as definitively in the envelope."""
+        ck = card_key(card)
+        self.matrix[ck][ENVELOPE] = True
+        for p in self.players:
+            self.matrix[ck][p] = False
+        self.envelope_probs[ck] = 1.0
+        self._propagate()
 
     def update_probabilities(self) -> None:
         # First pass: assign raw probabilities per card from holder constraints and bias
         for ck, holders in self.matrix.items():
             # Known holder
-            definite_holder = next((p for p, v in holders.items()
-                                    if v is True and p != ENVELOPE), None)
+            definite_holder = next(
+                (p for p, v in holders.items() if v is True and p != ENVELOPE), None)
             if definite_holder:
                 for p in self.players:
                     self.prob_matrix[p][ck] = 1.0 if p == definite_holder else 0.0
@@ -147,10 +153,10 @@ class KnowledgeBase:
                 continue
 
             # All players known not to have it -> must be envelope
-            if all(v is False or h == ENVELOPE for h, v in holders.items()):
-                self.envelope_probs[ck] = 1.0
+            if all(holders[p] is False for p in self.players):
                 for p in self.players:
                     self.prob_matrix[p][ck] = 0.0
+                self.envelope_probs[ck] = 1.0
                 continue
 
             # Proportional distribution among unknown players + envelope
@@ -171,12 +177,14 @@ class KnowledgeBase:
                     self.prob_matrix[p][ck] = 0.0
                 self.envelope_probs[ck] = 0.0
 
-        # Second pass: enforce category constraint — probabilities for envelope must sum to 1 per category
+        # Second pass: enforce category constraint — envelope probs sum to 1 per category
         for cat in ("Suspect", "Weapon", "Room"):
             cks = [card_key(c) for c in category_cards(cat)]
-            # Only consider candidates not ruled out of envelope and not already held by a player
-            candidates = [ck for ck in cks if self.matrix[ck][ENVELOPE] is not False and
-                          not any(self.matrix[ck][p] is True for p in self.players)]
+            candidates = [
+                ck for ck in cks
+                if self.matrix[ck][ENVELOPE] is not False
+                and not any(self.matrix[ck][p] is True for p in self.players)
+            ]
             if not candidates:
                 continue
             total_env = sum(self.envelope_probs[ck] for ck in candidates)
@@ -184,7 +192,6 @@ class KnowledgeBase:
                 for ck in candidates:
                     self.envelope_probs[ck] = self.envelope_probs[ck] / total_env
             else:
-                # Even split if all were zeroed by constraints
                 even = 1.0 / len(candidates)
                 for ck in candidates:
                     self.envelope_probs[ck] = even
@@ -203,7 +210,7 @@ class KnowledgeBase:
                     if row[h] is None:
                         row[h] = True
 
-        # Category-level
+        # Category exclusivity
         for cat in ("Suspect", "Weapon", "Room"):
             cks = [card_key(c) for c in category_cards(cat)]
             candidates = [ck for ck in cks if self.matrix[ck]
@@ -214,5 +221,4 @@ class KnowledgeBase:
                     if ck != candidates[0] and self.matrix[ck][ENVELOPE] is None:
                         self.matrix[ck][ENVELOPE] = False
 
-        # Update probabilities at the end
         self.update_probabilities()
