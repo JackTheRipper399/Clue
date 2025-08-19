@@ -134,6 +134,7 @@ class KnowledgeBase:
         self._propagate()
 
     def update_probabilities(self) -> None:
+        old_probs = self.envelope_probs.copy()
         # First pass: assign raw probabilities per card from holder constraints and bias
         for ck, holders in self.matrix.items():
             # Known holder
@@ -195,6 +196,11 @@ class KnowledgeBase:
                 even = 1.0 / len(candidates)
                 for ck in candidates:
                     self.envelope_probs[ck] = even
+
+        # --- MEMORY BLENDING: preserve soft bumps but allow decay ---
+        for ck in self.envelope_probs:
+            self.envelope_probs[ck] = 0.8 * \
+                self.envelope_probs[ck] + 0.2 * old_probs[ck]
 
     def _propagate(self) -> None:
         # Card exclusivity

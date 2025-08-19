@@ -68,15 +68,19 @@ class AIPlayer(Player):
                 self.kb.mark_envelope(card)
 
     def try_infer_envelope_after_no_refute(self, suggester: str, suggested: List[Card]) -> None:
-        """
-        As an observer: after everyone passed, if our KB already knows that
-        every player (including the suggester) does NOT have a card, then
-        it must be in the envelope.
-        """
         for card in suggested:
             ck = card_key(card)
-            if all(self.kb.matrix[ck].get(p) is False for p in self.kb.players):
+            holders = self.kb.matrix[ck]
+
+            if all(holders[p] is False for p in self.kb.players):
+                # Certain → mark as envelope
                 self.kb.mark_envelope(card)
+            else:
+                # Soft evidence → nudge probability upward
+                if holders[ENVELOPE] is None:
+                    bump = 0.15  # tweakable learning rate
+                    self.kb.envelope_probs[ck] = min(
+                        1.0, self.kb.envelope_probs[ck] + bump)
 
     def decide_suggestion(self) -> Tuple[Card, Card, Card]:
         # If ready to accuse, make that suggestion to confirm; else pick weighted unknowns
