@@ -115,28 +115,12 @@ class ClueApp(tk.Frame):
         if not cur.is_human:
             from models.player import AIPlayer
             ai: AIPlayer = cur  # type: ignore
-            acc = ai.decide_accusation()
-            if acc:
-                s, w, r = acc
-                self.engine.log(f"{ai.name} declares an accusation!")
-                correct = self.engine.check_accusation(ai, s, w, r)
-                self._refresh_all()
-                if correct:
-                    messagebox.showinfo(
-                        "AI wins", f"{ai.name} made a correct accusation!")
-                    return
-                else:
-                    # AI is eliminated; advance to next active player
-                    self.engine.next_turn()
-                    self._refresh_all()
-                    self._maybe_run_ai_turn()
-                    return
+            # Let the engine handle the whole turn (accuse → suggest)
+            self.engine.take_ai_turn(ai)
+            self._refresh_all()
 
-            # Suggest (only if still active and no accusation was made)
-            if not self.engine.game_over and ai.is_active:
-                s, w, r = ai.decide_suggestion()
-                _ = self.engine.handle_suggestion(ai, s, w, r)
-                self._refresh_all()
+            # If the game isn't over, pass turn and continue
+            if not self.engine.game_over:
                 self.engine.next_turn()
                 self._refresh_all()
                 self._maybe_run_ai_turn()

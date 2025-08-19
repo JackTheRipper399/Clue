@@ -210,3 +210,32 @@ class GameEngine:
             accuser.is_active = False
             self._maybe_end_if_single_remaining()
         return correct
+
+    def take_ai_turn(self, ai: AIPlayer):
+        """Runs an AI turn: attempt accusation, else make a suggestion."""
+        self.debug_probs(ai)  # See their current probability table
+
+        accusation = ai.decide_accusation()
+        if accusation:
+            s, w, r = accusation
+            self.log(
+                f"{ai.name} decides to accuse: {s.name} with the {w.name} in the {r.name}")
+            self.check_accusation(ai, s, w, r)
+            return
+
+        # If no accusation is made
+        s, w, r = ai.decide_suggestion()
+        self.handle_suggestion(ai, s, w, r)
+
+    def debug_probs(self, ai: AIPlayer):
+        """Print the top three envelope candidates per category."""
+        from models.cards import category_cards, card_key
+        print(f"\n[{ai.name} probability snapshot]")
+        for cat in ("Suspect", "Weapon", "Room"):
+            items = sorted(
+                [(c.name, round(ai.kb.envelope_probs[card_key(c)], 3))
+                 for c in category_cards(cat)],
+                key=lambda x: x[1],
+                reverse=True
+            )
+            print(f"{cat}: {items[:3]}")

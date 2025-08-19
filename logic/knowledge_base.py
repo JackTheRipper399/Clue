@@ -16,6 +16,7 @@ class KnowledgeBase:
         # NEW: probability tracking
         self.prob_matrix: Dict[str, Dict[str, float]] = {}
         self.envelope_probs: Dict[str, float] = {}
+        self.bias_matrix: Dict[str, Dict[str, float]] = {}
 
     def initialize(self, players: List[str], all_cards: List[Card], my_hand: List[Card]) -> None:
         self.players = players[:]
@@ -43,6 +44,8 @@ class KnowledgeBase:
             ck: 1.0 / len(category_cards(self.category_of_key(ck)))
             for ck in self.matrix
         }
+        self.bias_matrix = {p: {ck: 1.0 for ck in self.matrix}
+                            for p in players}
 
         self._propagate()
 
@@ -72,9 +75,9 @@ class KnowledgeBase:
         unknowns = [ck for ck in cks if self.matrix[ck][player] is None]
         if not unknowns:
             return
-        bump = 1.0 / len(unknowns)
+        # Increase weight so this player becomes a more likely holder for these cards
         for ck in unknowns:
-            self.prob_matrix[player][ck] += bump
+            self.bias_matrix[player][ck] += 1.0
         self._propagate()
 
     def is_card_resolved(self, card: Card) -> bool:
@@ -125,39 +128,66 @@ class KnowledgeBase:
         return card_key(card) in self.refuted_cards
 
     def update_probabilities(self) -> None:
+        # First pass: assign raw probabilities per card from holder constraints and bias
         for ck, holders in self.matrix.items():
-            # If someone definitively has it
-            definite_holder = next(
-                (p for p, v in holders.items() if v is True and p != ENVELOPE), None)
+            # Known holder
+            definite_holder = next((p for p, v in holders.items()
+                                    if v is True and p != ENVELOPE), None)
             if definite_holder:
                 for p in self.players:
                     self.prob_matrix[p][ck] = 1.0 if p == definite_holder else 0.0
                 self.envelope_probs[ck] = 0.0
                 continue
 
-            # If it's confirmed in envelope
+            # Confirmed in envelope
             if holders[ENVELOPE] is True:
                 for p in self.players:
                     self.prob_matrix[p][ck] = 0.0
                 self.envelope_probs[ck] = 1.0
                 continue
 
-            # If marked false everywhere but envelope
+            # All players known not to have it -> must be envelope
             if all(v is False or h == ENVELOPE for h, v in holders.items()):
                 self.envelope_probs[ck] = 1.0
                 for p in self.players:
                     self.prob_matrix[p][ck] = 0.0
                 continue
 
-            # Distribute evenly
+            # Proportional distribution among unknown players + envelope
             unknown_players = [p for p in self.players if holders[p] is None]
             env_unknown = holders[ENVELOPE] is None
-            slots = len(unknown_players) + (1 if env_unknown else 0)
-            if slots > 0:
-                share = 1.0 / slots
+            env_weight = 1.0 if env_unknown else 0.0
+            weights = {p: self.bias_matrix[p][ck] for p in unknown_players}
+            total_weight = env_weight + sum(weights.values())
+
+            if total_weight > 0:
                 for p in self.players:
-                    self.prob_matrix[p][ck] = share if p in unknown_players else 0.0
-                self.envelope_probs[ck] = share if env_unknown else 0.0
+                    self.prob_matrix[p][ck] = (
+                        weights[p] / total_weight) if p in weights else 0.0
+                self.envelope_probs[ck] = env_weight / total_weight
+            else:
+                # Fallback safety
+                for p in self.players:
+                    self.prob_matrix[p][ck] = 0.0
+                self.envelope_probs[ck] = 0.0
+
+        # Second pass: enforce category constraint — probabilities for envelope must sum to 1 per category
+        for cat in ("Suspect", "Weapon", "Room"):
+            cks = [card_key(c) for c in category_cards(cat)]
+            # Only consider candidates not ruled out of envelope and not already held by a player
+            candidates = [ck for ck in cks if self.matrix[ck][ENVELOPE] is not False and
+                          not any(self.matrix[ck][p] is True for p in self.players)]
+            if not candidates:
+                continue
+            total_env = sum(self.envelope_probs[ck] for ck in candidates)
+            if total_env > 0:
+                for ck in candidates:
+                    self.envelope_probs[ck] = self.envelope_probs[ck] / total_env
+            else:
+                # Even split if all were zeroed by constraints
+                even = 1.0 / len(candidates)
+                for ck in candidates:
+                    self.envelope_probs[ck] = even
 
     def _propagate(self) -> None:
         # Card exclusivity
