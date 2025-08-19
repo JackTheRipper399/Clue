@@ -1,7 +1,7 @@
 import random
 from typing import List, Optional, Dict, Tuple
 from dataclasses import dataclass, field
-from models.cards import Card, CardType, category_cards
+from models.cards import Card, CardType, category_cards, card_key
 from logic.knowledge_base import KnowledgeBase
 
 
@@ -61,21 +61,14 @@ class AIPlayer(Player):
         self.kb.note_has_one_of(player, suggested)
 
     def decide_suggestion(self) -> Tuple[Card, Card, Card]:
-        # If ready to accuse, make that suggestion to confirm; else pick informative unknowns
         maybe_solution = self.kb.current_solution_guess()
         if maybe_solution:
             return maybe_solution
 
         def pick(cat: CardType) -> Card:
-            # Prefer cards that are still possible for ENVELOPE; else any unknown
-            unknowns = self.kb.possible_in_envelope(cat)
-            if unknowns:
-                return random.choice(unknowns)
-            # fallback: any card not in our hand and still uncertain
-            for c in category_cards(cat):
-                if not self.kb.is_card_resolved(c):
-                    return c
-            return random.choice(category_cards(cat))  # absolute fallback
+            possibles = category_cards(cat)
+            # Pick highest envelope probability
+            return max(possibles, key=lambda c: self.kb.envelope_probs[card_key(c)])
 
         return (pick("Suspect"), pick("Weapon"), pick("Room"))
 

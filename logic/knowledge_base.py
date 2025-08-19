@@ -13,6 +13,10 @@ class KnowledgeBase:
         # Track cards that have been revealed/refuted at least once
         self.refuted_cards: set[str] = set()
 
+        # NEW: probability tracking
+        self.prob_matrix: Dict[str, Dict[str, float]] = {}
+        self.envelope_probs: Dict[str, float] = {}
+
     def initialize(self, players: List[str], all_cards: List[Card], my_hand: List[Card]) -> None:
         self.players = players[:]
         holders = players + [ENVELOPE]
@@ -32,13 +36,26 @@ class KnowledgeBase:
             if self.matrix[ck][self.owner]:
                 self.matrix[ck][ENVELOPE] = False
 
+        # Init probability structures
+        self.prob_matrix = {p: {ck: 0.0 for ck in self.matrix}
+                            for p in players}
+        self.envelope_probs = {
+            ck: 1.0 / len(category_cards(self.category_of_key(ck)))
+            for ck in self.matrix
+        }
+
         self._propagate()
+
+    def category_of_key(self, ck: str) -> CardType:
+        for cat in ("Suspect", "Weapon", "Room"):
+            if ck in [card_key(c) for c in category_cards(cat)]:
+                return cat
+        raise ValueError(f"Unknown card key {ck}")
 
     def note_has_card(self, player: str, card: Card) -> None:
         ck = card_key(card)
         for h in self.matrix[ck]:
             self.matrix[ck][h] = (h == player)
-        # Mark this card as refuted — it has been shown at least once
         self.refuted_cards.add(ck)
         self._propagate()
 
@@ -51,7 +68,13 @@ class KnowledgeBase:
         self._propagate()
 
     def note_has_one_of(self, player: str, cards: List[Card]) -> None:
-        # Placeholder for future deduction logic
+        cks = [card_key(c) for c in cards]
+        unknowns = [ck for ck in cks if self.matrix[ck][player] is None]
+        if not unknowns:
+            return
+        bump = 1.0 / len(unknowns)
+        for ck in unknowns:
+            self.prob_matrix[player][ck] += bump
         self._propagate()
 
     def is_card_resolved(self, card: Card) -> bool:
@@ -96,15 +119,48 @@ class KnowledgeBase:
         return None
 
     def is_known_to_player(self, player: str, card: Card) -> Optional[bool]:
-        """Return True if player is known to have the card, False if known not to, None if unknown."""
         return self.matrix.get(card_key(card), {}).get(player)
 
     def has_been_refuted_before(self, card: Card) -> bool:
-        """Return True if this card has been revealed/refuted at least once before."""
         return card_key(card) in self.refuted_cards
 
+    def update_probabilities(self) -> None:
+        for ck, holders in self.matrix.items():
+            # If someone definitively has it
+            definite_holder = next(
+                (p for p, v in holders.items() if v is True and p != ENVELOPE), None)
+            if definite_holder:
+                for p in self.players:
+                    self.prob_matrix[p][ck] = 1.0 if p == definite_holder else 0.0
+                self.envelope_probs[ck] = 0.0
+                continue
+
+            # If it's confirmed in envelope
+            if holders[ENVELOPE] is True:
+                for p in self.players:
+                    self.prob_matrix[p][ck] = 0.0
+                self.envelope_probs[ck] = 1.0
+                continue
+
+            # If marked false everywhere but envelope
+            if all(v is False or h == ENVELOPE for h, v in holders.items()):
+                self.envelope_probs[ck] = 1.0
+                for p in self.players:
+                    self.prob_matrix[p][ck] = 0.0
+                continue
+
+            # Distribute evenly
+            unknown_players = [p for p in self.players if holders[p] is None]
+            env_unknown = holders[ENVELOPE] is None
+            slots = len(unknown_players) + (1 if env_unknown else 0)
+            if slots > 0:
+                share = 1.0 / slots
+                for p in self.players:
+                    self.prob_matrix[p][ck] = share if p in unknown_players else 0.0
+                self.envelope_probs[ck] = share if env_unknown else 0.0
+
     def _propagate(self) -> None:
-        # Card exclusivity: only one holder per card
+        # Card exclusivity
         for ck, row in self.matrix.items():
             trues = [h for h, v in row.items() if v is True]
             if len(trues) == 1:
@@ -117,7 +173,7 @@ class KnowledgeBase:
                     if row[h] is None:
                         row[h] = True
 
-        # Category-level: exactly one of each category in envelope
+        # Category-level
         for cat in ("Suspect", "Weapon", "Room"):
             cks = [card_key(c) for c in category_cards(cat)]
             candidates = [ck for ck in cks if self.matrix[ck]
@@ -127,3 +183,6 @@ class KnowledgeBase:
                 for ck in cks:
                     if ck != candidates[0] and self.matrix[ck][ENVELOPE] is None:
                         self.matrix[ck][ENVELOPE] = False
+
+        # Update probabilities at the end
+        self.update_probabilities()
