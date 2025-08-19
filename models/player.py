@@ -44,6 +44,8 @@ class AIPlayer(Player):
     def __init__(self, name: str):
         super().__init__(name=name, is_human=False)
         self.kb = KnowledgeBase(self.name)
+        self.last_unrefuted_suggestion: Optional[Tuple[str,
+                                                       Tuple[Card, Card, Card]]] = None
 
     def on_dealt(self, players: List[str], all_cards: List[Card]) -> None:
         self.kb.initialize(players, all_cards, self.hand)
@@ -61,11 +63,14 @@ class AIPlayer(Player):
     def note_has_one_of(self, player: str, suggested: List[Card]) -> None:
         self.kb.note_has_one_of(player, suggested)
 
-    def note_no_one_refuted(self, suggested: List[Card]) -> None:
-        """As the suggester: if nobody refuted and we don't own the cards, they must be in the envelope."""
-        for card in suggested:
-            if card not in self.hand:
-                self.kb.mark_envelope(card)
+    def note_no_one_refuted(self, suggested: List[Card], suggester: str) -> None:
+        """If we're the suggester: mark envelope for any we don't hold."""
+        if self.name == suggester:
+            for card in suggested:
+                if card not in self.hand:
+                    self.kb.mark_envelope(card)
+        # All AIs remember this event for a possible probe
+        self.last_unrefuted_suggestion = (suggester, tuple(suggested))
 
     def try_infer_envelope_after_no_refute(self, suggester: str, suggested: List[Card]) -> None:
         for card in suggested:
@@ -82,7 +87,19 @@ class AIPlayer(Player):
                     self.kb.envelope_probs[ck] = min(
                         1.0, self.kb.envelope_probs[ck] + bump)
 
+        # Remember triple for possible probing
+        self.last_unrefuted_suggestion = (suggester, tuple(suggested))
+
     def decide_suggestion(self) -> Tuple[Card, Card, Card]:
+        # --- PROBE LOGIC ---
+        if self.last_unrefuted_suggestion:
+            suggester_name, triple = self.last_unrefuted_suggestion
+            if suggester_name in self.kb.players:
+                # Only probe if at least one card in triple is still unknown for that player
+                if any(self.kb.is_known_to_player(suggester_name, c) is None for c in triple):
+                    self.last_unrefuted_suggestion = None  # Use it once
+                    return triple
+
         # If ready to accuse, make that suggestion to confirm; else pick weighted unknowns
         maybe_solution = self.kb.current_solution_guess()
         if maybe_solution:
@@ -112,7 +129,7 @@ class AIPlayer(Player):
             best = max(candidates, key=score)
             guess.append(best)
 
-        return tuple(guess)  # type: ignore[return-value]
+        return tuple(guess)
 
     def decide_accusation(self) -> Optional[Tuple[Card, Card, Card]]:
         # 1) Absolute certainty

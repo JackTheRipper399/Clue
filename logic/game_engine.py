@@ -189,13 +189,14 @@ class GameEngine:
             for passer in passes_before_refute:
                 suggester.note_pass(passer, suggested)
             # Suggester can conclude envelope for any of the suggested cards they don't hold
-            suggester.note_no_one_refuted(suggested)
+            suggester.note_no_one_refuted(suggested, suggester.name)
 
         # Observers also learn all passes; some may be able to conclude envelope too
         for p in self.players:
             if isinstance(p, AIPlayer):
                 for passer in passes_before_refute:
                     p.note_pass(passer, suggested)
+                p.note_no_one_refuted(suggested, suggester.name)
                 p.try_infer_envelope_after_no_refute(suggester.name, suggested)
 
         self.suggested_this_turn = True
@@ -221,7 +222,6 @@ class GameEngine:
 
     def take_ai_turn(self, ai: AIPlayer):
         """Runs an AI turn: attempt accusation, else suggest, then re-check accusation."""
-        self.debug_probs(ai)  # Console snapshot of current beliefs
 
         # First attempt: accuse right away if confident
         accusation = ai.decide_accusation()
@@ -244,15 +244,3 @@ class GameEngine:
                 self.log(
                     f"{ai.name} makes a follow-up accusation after suggestion: {s.name} with the {w.name} in the {r.name}")
                 self.check_accusation(ai, s, w, r)
-
-    def debug_probs(self, ai: AIPlayer):
-        """Print the top three envelope candidates per category for an AI."""
-        print(f"\n[{ai.name} probability snapshot]")
-        for cat in ("Suspect", "Weapon", "Room"):
-            items = sorted(
-                [(c.name, round(ai.kb.envelope_probs[card_key(c)], 3))
-                 for c in category_cards(cat)],
-                key=lambda x: x[1],
-                reverse=True
-            )
-            print(f"{cat}: {items[:3]}")
